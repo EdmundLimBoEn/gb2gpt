@@ -1,0 +1,9 @@
+{
+  "fleet_name": "My bot fleet",
+  "public_url": "http://127.0.0.1:8787",
+  "oauth_redirect_uris": ["https://chatgpt.com/connector_platform_oauth_redirect"],
+  "bots": [
+    {"id": "alpha", "name": "Alpha", "token_env": "BOT_ALPHA_TOKEN"},
+    {"id": "beta", "name": "Beta", "token_env": "BOT_BETA_TOKEN"}
+  ]
+}

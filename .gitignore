@@ -1,0 +1,7 @@
+.env
+fleet.json
+data/
+__pycache__/
+*.pyc
+.venv/
+*.sqlite*
