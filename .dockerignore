@@ -1,0 +1,6 @@
+.env
+fleet.json
+data
+.git
+__pycache__
+tests
