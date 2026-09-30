@@ -6,7 +6,7 @@ Chat with your **Cursor Grok Bot fleet from an ordinary ChatGPT conversation** u
 
 **What you need before starting.** gb2gpt is only useful if you already use [Cursor Grok Bots](https://cursor.com/help/grok-bot): cloud agents with their own secrets, bot-to-bot messaging, and *routines* (saved instructions a bot runs manually, on a schedule, or when its webhook is called). The bridge does not run a model itself; your bots do the work and report back. Without a Grok Bot fleet there is nothing for ChatGPT to talk to.
 
-Two boundaries matter: the server cannot write native ChatGPT memory, and it cannot push a late reply into an idle chat. The first-conversation prompt requests a memory save and asks you to verify it; pending replies are polled. See [ChatGPT setup](CHATGPT_SETUP.md) and the [architecture/threat model](docs/DESIGN.md).
+Two boundaries matter: the server cannot write native ChatGPT memory, and it cannot push a late reply into an idle chat. The first-conversation prompt requests a memory save and asks you to verify it; pending replies are polled, and delegated work that finishes later lands on the same job. See [ChatGPT setup](CHATGPT_SETUP.md) and the [architecture/threat model](docs/DESIGN.md).
 
 ## Recommended: your own relay bot
 

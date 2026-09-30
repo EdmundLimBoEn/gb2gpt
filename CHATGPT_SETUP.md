@@ -38,6 +38,7 @@ ChatGPT may ask you to approve write tools. Its [Developer mode guide](https://d
 - **Queued, wake disabled:** manually run the selected bot's worker routine, enable an appropriate schedule, or deliberately enable webhook wake in the bridge. Disabled wake does not itself run bots.
 - **Wake accepted, job queued:** check that the routine claims jobs and has the correct bot credential. The HTTP response is not an answer.
 - **Running:** poll later. The bot must report back, renewing its 15-minute claim if needed.
+- **Waiting:** the bot accepted or delegated the work and posted a progress note. The final answer lands on the same job; later, ask “Check the last job again.”
 - **No hub / discovery failed:** the sampled bot must know one exact configured fleet ID. Clarify the fleet to it or explicitly choose a hub; do not fabricate discovery.
 - **401/link failure:** verify HTTPS origin, OAuth client-secret field, exact callback, and bridge login. Never solve this by switching the endpoint to No Authentication.
 

@@ -117,6 +117,49 @@ class BridgeTest(unittest.TestCase):
         with self.assertRaises(Error):
             self.call('report_job', args, 'a')
 
+    def test_waiting_job_takes_late_final_result(self):
+        jid = self.create()['job']['id']
+        claim = self.call('claim_job', {}, 'a')
+        waiting = {'job_id': jid, 'claim_token': claim['claim_token'], 'status': 'waiting', 'result': 'Delegated to alex; link to follow'}
+        self.assertIsNone(self.call('report_job', waiting, 'a')['lease_until'])
+        self.assertEqual(self.call('report_job', waiting, 'a')['status'], 'waiting')
+        for name, args in [('report_job', dict(waiting, status='succeeded', result='early')), ('renew_job', {'job_id': jid, 'claim_token': claim['claim_token']})]:
+            with self.assertRaises(Error):
+                self.call(name, args, 'a')
+        self.assertIsNone(self.call('claim_job', {}, 'a')['job'])
+        self.assertIsNone(self.call('claim_job', {'job_id': jid}, 'b')['job'])
+        started = time.monotonic()
+        polled = self.call('get_job', {'job_id': jid, 'wait_seconds': 5})
+        self.assertEqual((polled['status'], polled['result']), ('waiting', 'Delegated to alex; link to follow'))
+        self.assertLess(time.monotonic() - started, 1)
+        self.app.wake_enabled = True
+        self.app.bots['a'].update(webhook_url='https://api2.cursor.sh/automations/webhook/example', webhook_key_env='BOT_A')
+        with patch('bridge.build_opener') as opener:
+            self.assertEqual(self.call('wake_job', {'job_id': jid})['wake_count'], 0)
+            opener.assert_not_called()
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            claims = [c for c in ex.map(lambda _: self.call('claim_job', {'job_id': jid}, 'a'), range(4)) if c['job']]
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0]['job']['status'], 'running')
+        with self.assertRaises(Error):
+            self.call('report_job', waiting, 'a')
+        final = self.call('report_job', {'job_id': jid, 'claim_token': claims[0]['claim_token'], 'status': 'succeeded', 'result': 'Doc link'}, 'a')
+        self.assertEqual((final['status'], final['result']), ('succeeded', 'Doc link'))
+
+    def test_waiting_discovery_binds_only_after_final(self):
+        with patch('bridge.secrets.choice', return_value='a'):
+            jid = self.call('discover_hub', {'conversation_id': 'chat', 'request_id': 'd'})['job']['id']
+        claim = self.call('claim_job', {}, 'a')
+        args = {'job_id': jid, 'claim_token': claim['claim_token'], 'status': 'waiting', 'result': 'Asking chief of staff'}
+        with self.assertRaises(Error):
+            self.call('report_job', dict(args, hub_bot_id='a'), 'a')
+        self.call('report_job', args, 'a')
+        with self.assertRaises(Error):
+            self.call('bind_hub', {'conversation_id': 'chat', 'discovery_job_id': jid})
+        claim = self.call('claim_job', {'job_id': jid}, 'a')
+        self.call('report_job', dict(args, claim_token=claim['claim_token'], status='succeeded', result='a is hub', hub_bot_id='a'), 'a')
+        self.assertEqual(self.call('bind_hub', {'conversation_id': 'chat', 'discovery_job_id': jid})['hub_bot_id'], 'a')
+
     def test_scope_and_claim_token_separation(self):
         jid = self.create()['job']['id']
         self.assertIsNone(self.call('claim_job', {}, 'b')['job'])
