@@ -129,7 +129,7 @@ class BridgeTest(unittest.TestCase):
         self.assertIsNone(self.call('claim_job', {}, 'a')['job'])
         self.assertIsNone(self.call('claim_job', {'job_id': jid}, 'b')['job'])
         started = time.monotonic()
-        polled = self.call('get_job', {'job_id': jid, 'wait_seconds': 5})
+        polled = self.call('get_job', {'job_id': jid, 'wait_seconds': 0})
         self.assertEqual((polled['status'], polled['result']), ('waiting', 'Delegated to alex; link to follow'))
         self.assertLess(time.monotonic() - started, 1)
         self.app.wake_enabled = True
@@ -145,6 +145,24 @@ class BridgeTest(unittest.TestCase):
             self.call('report_job', waiting, 'a')
         final = self.call('report_job', {'job_id': jid, 'claim_token': claims[0]['claim_token'], 'status': 'succeeded', 'result': 'Doc link'}, 'a')
         self.assertEqual((final['status'], final['result']), ('succeeded', 'Doc link'))
+
+    def test_waiting_long_poll_waits_for_terminal_result(self):
+        for status in ('succeeded', 'failed'):
+            with self.subTest(status=status):
+                jid = self.create(request_id=status)['job']['id']
+                claim = self.call('claim_job', {}, 'a')
+                self.call('report_job', {'job_id': jid, 'claim_token': claim['claim_token'], 'status': 'waiting', 'result': 'pending bibble'}, 'a')
+                started = time.monotonic()
+                self.assertEqual(self.call('get_job', {'job_id': jid, 'wait_seconds': 1})['status'], 'waiting')
+                self.assertGreaterEqual(time.monotonic() - started, 1)
+                with ThreadPoolExecutor() as ex:
+                    poll = ex.submit(self.call, 'get_job', {'job_id': jid, 'wait_seconds': 2})
+                    time.sleep(0.25)
+                    self.assertFalse(poll.done())
+                    claim = self.call('claim_job', {'job_id': jid}, 'a')
+                    self.call('report_job', {'job_id': jid, 'claim_token': claim['claim_token'], 'status': status, 'result': 'final from bibble'}, 'a')
+                    result = poll.result(timeout=3)
+                self.assertEqual((result['status'], result['result']), (status, 'final from bibble'))
 
     def test_waiting_discovery_binds_only_after_final(self):
         with patch('bridge.secrets.choice', return_value='a'):

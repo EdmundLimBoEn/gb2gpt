@@ -29,7 +29,8 @@ sequenceDiagram
     H->>M: claim_job; report_job(answer)
     C->>M: get_job (bounded poll)
     M-->>C: Actual answer or still pending
-    C-->>U: Attributed answer or pending job ID
+    C->>M: Repeat get_job while queued/running/waiting
+    C-->>U: Attributed final answer or failure
 ```
 
 One Python process and one SQLite file, persisted on a local disk/volume. No queue daemon, model API, frontend build, paid auth provider, scheduler, or fleet-specific runtime identity. HTTPS must be reachable by both remote clients: use an existing TLS reverse proxy or a tunnel. Run one instance per fleet/owner; not a multi-tenant service. Localhost alone cannot connect cloud clients.
@@ -53,7 +54,7 @@ Full helper instructions are in [`prompts/chatgpt.md`](../prompts/chatgpt.md) an
 
 Wake is a separate state: `disabled`, `not_configured`, `unknown`, `accepted`, or `rejected`. Only documented HTTP 200 means accepted. No webhook response body becomes a job result. Timeouts/crashes around wake leave uncertain delivery; no automatic network retry. Explicit wake retries are limited to five per job, at least 30 seconds apart. A trusted routine drains up to ten jobs per run; schedules can recover a missed wake if the owner chooses their usage cost. No hidden wake loop exists.
 
-The bot must `report_job`; answering only in its own chat does not deliver to ChatGPT. `get_job` can wait up to 20 seconds; prompts recommend at most three 15-second polls in one ChatGPT turn. Later completion requires another check; a delegated result lands on the same job, so checking that job again retrieves it. This v1 cannot push an unsolicited message into an idle ChatGPT conversation. Outside effects are at-least-once: use job IDs for deduplication in external systems before repeating reclaimed work.
+The bot must `report_job`; answering only in its own chat does not deliver to ChatGPT. `get_job` waits up to 20 seconds for any non-terminal state, including `waiting`; prompts require repeated 15-second polls on the same job in the same ChatGPT turn until `succeeded` or `failed`. Each poll timeout bounds one HTTP request, not the job or the turn; a delegated result lands on the same job, so checking that job again retrieves it. This v1 cannot push an unsolicited message into an idle ChatGPT conversation. Outside effects are at-least-once: use job IDs for deduplication in external systems before repeating reclaimed work.
 
 ## Threat model
 

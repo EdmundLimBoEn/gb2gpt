@@ -208,7 +208,7 @@ Deploy code updates, restart `gb2gpt`, and recheck health. After editing Nginx, 
 
 Use an ordinary chat opened from the connected app's **Try in chat** button (on the app's page under Plugins), or any new chat with `gb2gpt` enabled from **+ → Developer mode/tools**. Paste the ritual from `prompts/chatgpt.md` first. Once discovery has succeeded and `bind_hub` has returned your relay, send:
 
-> Use create_job with this chat's conversation_id and a fresh request_id; omit bot_id. Ask my chief of staff through the relay to reply “Relay connection confirmed” and identify the relay. Connectivity check only; no other actions. Show the job ID. Poll get_job with wait_seconds=15 at most three times and display the actual result with its source.
+> Use create_job with this chat's conversation_id and a fresh request_id; omit bot_id. Ask my chief of staff through the relay to reply “Relay connection confirmed” and identify the relay. Connectivity check only; no other actions. Show the job ID. Keep polling get_job with wait_seconds=15 on that same job until succeeded or failed in this turn, then display the actual result with its source.
 
 The tool is **create_job**, not `send_message`. The coordinator's name belongs in the message, not `bot_id`, unless that coordinator is actually configured in `fleet.json`. Keep the returned job ID. A queued/running result means check the same job again later; it does not authorize inventing a reply or repeatedly creating jobs. A retry of job creation must reuse the same conversation_id, request_id, and arguments. A new user request gets a new request_id.
 
