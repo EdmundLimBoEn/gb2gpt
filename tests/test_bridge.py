@@ -204,10 +204,11 @@ class BridgeTest(unittest.TestCase):
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
         data = {'client_id': 'gb2gpt', 'redirect_uri': self.config['oauth_redirect_uris'][0], 'resource': self.app.resource, 'response_type': 'code', 'code_challenge_method': 'S256', 'code_challenge': challenge, 'state': 'test-state', 'scope': 'bridge'}
         opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()), NoRedirect())
-        status, _, body = self.http('/authorize?' + urlencode(data), opener=opener)
+        status, headers, body = self.http('/authorize?' + urlencode(data), opener=opener)
         self.assertEqual(status, 200)
+        self.assertEqual(headers['Referrer-Policy'], 'strict-origin')
         form = re.search(r'name="form" value="([^"]+)"', body).group(1)
-        status, headers, _ = self.http('/authorize', {'form': form, 'password': os.environ['BRIDGE_TOKEN']}, form=True, opener=opener)
+        status, headers, _ = self.http('/authorize', {'form': form, 'password': os.environ['BRIDGE_TOKEN']}, form=True, opener=opener, headers={'Origin': self.base})
         self.assertEqual(status, 302)
         callback = parse_qs(urlsplit(headers['Location']).query)
         self.assertEqual(callback['iss'][0], self.base)
@@ -235,6 +236,8 @@ class BridgeTest(unittest.TestCase):
     def test_oauth_redirect_and_csrf_rejection(self):
         self.assertEqual(self.http('/authorize?' + urlencode({'client_id': 'gb2gpt', 'redirect_uri': 'https://evil.example'}))[0], 400)
         self.assertEqual(self.http('/authorize', {'form': 'fake', 'password': os.environ['BRIDGE_TOKEN']}, form=True)[0], 403)
+        for origin in ('null', 'https://evil.example'):
+            self.assertEqual(self.http('/authorize', {'form': 'fake', 'password': os.environ['BRIDGE_TOKEN']}, form=True, headers={'Origin': origin})[0], 403)
 
     def test_input_validation_and_webhook_ssrf(self):
         for extra in ({'dry_run': 'false'}, {'extra': 'field'}):

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Isolated real-HTTP smoke; no credentials/fleet needed and no outbound wake."""
+import sys
+if len(sys.argv) > 1:
+    raise SystemExit(__doc__)
 import json
 import os
 from pathlib import Path
 import secrets
 import socket
 import subprocess
-import sys
 import tempfile
 import time
 from urllib.request import Request, urlopen

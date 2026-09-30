@@ -1,0 +1,8 @@
+{
+  "fleet_name": "My ChatGPT relay",
+  "public_url": "http://127.0.0.1:8787",
+  "oauth_redirect_uris": ["https://chatgpt.com/connector_platform_oauth_redirect"],
+  "bots": [
+    {"id": "gb2gpt", "name": "gb2gpt (fleet relay)", "token_env": "BOT_GB2GPT_TOKEN"}
+  ]
+}

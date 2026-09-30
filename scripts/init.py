@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Generate local secrets without printing or overwriting them."""
+import sys
+if len(sys.argv) > 1:
+    raise SystemExit(__doc__)
 import json
 import os
 from pathlib import Path

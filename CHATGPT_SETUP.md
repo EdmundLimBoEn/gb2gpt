@@ -2,14 +2,20 @@
 
 First complete the [bridge + fleet quickstart](README.md#quickstart). You need its stable HTTPS URL and at least one working bot worker. No keys belong in a chat message.
 
-1. On ChatGPT web: **Settings → Security and login → Developer mode**. Open **[Plugins](https://chatgpt.com/plugins) → +** and name the connection `gb2gpt`.
-2. Enter `https://YOUR-BRIDGE-HOST/mcp`. Choose **OAuth**, static client ID **`gb2gpt`**, and copy **`OAUTH_CLIENT_SECRET`** from your local `.env` into the client-secret field. On the bridge's login page, enter **`BRIDGE_TOKEN`** into its password field. These are secure configuration/browser fields, never chat. If the callback shown by ChatGPT differs from the sample, put that exact URL in `fleet.json` → `oauth_redirect_uris`, restart the bridge, and retry. [Official auth contract](https://developers.openai.com/plugins/build/auth).
+For the recommended dedicated relay, first follow [SELF_HOSTING.md](docs/SELF_HOSTING.md). The bridge hub is the relay; your existing chief of staff remains behind it.
+
+Menu names below are from the ChatGPT web UI as of September 2026 and may change; the settings themselves (MCP URL, OAuth client, scope) are what matter.
+
+1. On ChatGPT web: **Settings → Security and login → Developer mode**. Open **[Plugins](https://chatgpt.com/plugins) → Add → Create MCP App** and name the connection `gb2gpt`.
+2. Enter `https://YOUR-BRIDGE-HOST/mcp`. Choose **OAuth → Advanced OAuth settings → User-Defined OAuth Client**, static client ID **`gb2gpt`**, and copy **`OAUTH_CLIENT_SECRET`** from your local `.env` into the client-secret field. Set token endpoint auth to **client_secret_basic** and default scope to **bridge**; leave base scopes empty. On the bridge's login page, enter **`BRIDGE_TOKEN`** into its password field. These are secure configuration/browser fields, never chat. If the callback shown by ChatGPT differs from the sample, put that exact URL in `fleet.json` → `oauth_redirect_uris`, restart the bridge, and retry. [Official auth contract](https://developers.openai.com/plugins/build/auth).
 3. Open a normal ChatGPT conversation, add `gb2gpt` from **+ → Developer mode/tools**, and paste the ritual below. If your UI places plugins in the Work tab, start an ordinary Work conversation; no Custom GPT is required. Enable memory under **Settings → Personalization** when available. [Connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt), [memory controls](https://learn.chatgpt.com/docs/customization/memories).
 
 ```text
 Use gb2gpt for my bot messages in this chat. Choose a fresh conversation_id and
 keep using it. Call discover_hub once: let the bridge RANDOMLY pick a configured
-bot and ask who the main/chief-of-staff bot is. Poll get_job for its real answer,
+bot and ask which configured bot is the routing hub. If it is a dedicated
+relay, preserve the distinction between that relay and the real chief of staff.
+Poll get_job for its real answer,
 then bind_hub using that discovery job. Ask native ChatGPT memory to save the
 returned memory_text. Never claim it was saved without verification; tell me
 if memory is unavailable. After that, route my messages through the hub by
@@ -21,7 +27,9 @@ pending job ID so I can ask you to check again. Never put secrets in chat or mem
 
 4. Check ChatGPT's saved-memory controls under **Personalization** for the correct fleet/hub identity. This is the completion check for native memory. If memory cannot be saved in this chat, copy only the returned non-secret `memory_text` into a regular memory-enabled chat with “Remember this”, verify it there, and return. If memory is disabled account-wide, that product requirement cannot be satisfied; SQLite routing still works in the connected chat. The bridge cannot programmatically save or verify ChatGPT memory.
 
-Now say something like **“Ask the hub what needs my attention today.”** Follow-ups in this same connected chat use the same hub. **“Send this one to beta instead”** overrides one message. **“Make beta my hub for this chat”** explicitly changes the default. When pending, **“Check the last job again.”** A new conversation needs the connection selected and its own conversation ID; ask to reuse your remembered hub or rediscover it.
+Now say something like **“Ask the hub what needs my attention today.”** Follow-ups in this same connected chat use the same hub. With the recommended single relay, **“Ask the relay to send this to my research bot”** keeps the bridge destination `gb2gpt` and puts the downstream bot name in the message. Downstream bots do not need bridge credentials and must not be invented as bridge `bot_id` values.
+
+For a direct multi-worker fleet only, **“Send this one to beta instead”** overrides one message if `beta` appears in `list_bots`; **“Make beta my hub for this chat”** explicitly changes the default. When pending, **“Check the last job again.”** A new conversation needs the connection selected and its own conversation ID; ask to reuse your remembered hub or rediscover it.
 
 ChatGPT may ask you to approve write tools. Its [Developer mode guide](https://developers.openai.com/api/docs/guides/developer-mode) explains conversation-level confirmation controls. Tool availability, memory, and approvals depend on the account/workspace; paid access alone does not override an administrator's restrictions.
 

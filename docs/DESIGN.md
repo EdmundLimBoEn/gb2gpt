@@ -1,4 +1,4 @@
-# gb2gpt v1 — implementation and acceptance plan
+# gb2gpt v1 — design, threat model and acceptance
 
 A personal, single-owner bridge between ordinary ChatGPT conversations and an operator-configured Cursor Grok Bot fleet. Default: remote Streamable HTTP MCP with OAuth for ChatGPT, a SQLite job ledger, and authenticated bot workers. This is a composition of documented interfaces, not an official ChatGPT↔Grok Bot product. It does not use grok.com, xAI APIs, Discord, or a private `:1340` gateway.
 
@@ -45,7 +45,7 @@ ChatGPT speaks MCP at `/mcp`. It links via the server's single-owner OAuth autho
 5. If that ChatGPT surface/workspace disables memory, the strict first-conversation native-memory requirement is unmet there. Save the returned identity sentence in a separate memory-enabled regular chat, then return; if memory is unavailable everywhere, only chat-local routing is available. Do not label the bridge database, context, or a file as ChatGPT memory. The fetched official docs establish account/workspace memory controls, not a guaranteed MCP memory-write capability.
 6. Subsequent requests omit `bot_id` and use the durable hub for that conversation. A one-message override does not change it. Explicit `set_hub` changes the chat default. A new chat needs a new conversation ID and either user-authorized reuse of the remembered hub or discovery; MCP does not supply a reliable native ChatGPT thread ID here. Do not route unrelated conversations automatically.
 
-Full helper instructions are in `prompts/chatgpt.md` and returned by MCP initialization. Model compliance and native memory remain host responsibilities; the server cannot intercept every ChatGPT utterance or force tool use.
+Full helper instructions are in [`prompts/chatgpt.md`](../prompts/chatgpt.md) and returned by MCP initialization. Model compliance and native memory remain host responsibilities; the server cannot intercept every ChatGPT utterance or force tool use.
 
 ## Async contract and recovery
 
@@ -74,7 +74,7 @@ The bot must `report_job`; answering only in its own chat does not deliver to Ch
 
 | Dependency | Why |
 | --- | --- |
-| Python 3.11+ standard library, including SQLite | HTTP, JSON-RPC subset, auth, durable queue, cryptographic randomness, HTTP client and tests; zero PyPI runtime dependencies. Tested here on 3.13. |
+| Python 3.11+ standard library, including SQLite | HTTP, JSON-RPC subset, auth, durable queue, cryptographic randomness, HTTP client and tests; zero PyPI runtime dependencies. Tested on 3.12, 3.13 and 3.14. |
 | Paid ChatGPT account with Developer mode permitted | Ordinary chat MCP client; Plus/Pro eligibility is documented, workspace restrictions can apply. No OpenAI API billing/key. |
 | Cursor account with Grok Bots and working routines/usage | Actual fleet execution, secure bot credentials and optional official wake. A generic Cursor plan name alone is not a guarantee of access. |
 | Stable public HTTPS origin reachable by both sides | Cloud clients cannot reach a laptop's localhost. Existing server/proxy or free tunnel can satisfy this; hosting/domain may cost if not already available. |
@@ -88,11 +88,13 @@ Automated: real HTTP startup and dry-run smoke, discovery/normal routing/overrid
 
 Local results: 14 automated tests passed on Python 3.13.5; standalone HTTP smoke passed. Independent official MCP Python SDK 2.2.0 passed initialization, tool listing, random discovery, worker claim/report, polling, hub binding and dry-run submission against the actual server. The optional SDK lives in a temporary virtual environment, outside the application. OpenAPI generation also ran successfully.
 
-Operator live acceptance remains necessary: link ChatGPT OAuth over HTTPS; connect each bot's scoped worker; perform random discovery; verify the native saved memory; send two ordinary messages through the hub and one explicit override; watch an actual bot report arrive. Real paid accounts and their current UI were not available in this workspace. Do not describe local tests as a live ChatGPT↔Cursor end-to-end certification. Docker is supplied but the workspace has no Docker executable.
+The reusable dedicated-relay path is [SELF_HOSTING.md](SELF_HOSTING.md). It has been deployed and accepted end to end (ChatGPT OAuth, relay discovery, a real round trip to a downstream coordinator, and automatic webhook wake) on a Linux host behind Cloudflare Tunnel.
+
+Operator live acceptance remains necessary: link ChatGPT OAuth over HTTPS; connect each bot's scoped worker; perform random discovery; verify the native saved memory; send two ordinary messages through the hub and one explicit override; watch an actual bot report arrive. Do not describe local tests as a live ChatGPT↔Cursor end-to-end certification. Docker is supplied but the workspace has no Docker executable.
 
 ## Evidence (checked 2026-09-30)
 
-The supplied `/workspace/chatgpt-grokbot-bridge.md` is the baseline. Current official pages used for implementation decisions:
+Official pages used for implementation decisions:
 
 - [ChatGPT Developer mode](https://developers.openai.com/api/docs/guides/developer-mode): regular-chat tools, eligibility and supported auth. Static OAuth avoids pretending ChatGPT accepts custom Bearer headers.
 - [Connect an MCP plugin](https://developers.openai.com/plugins/deploy/connect-chatgpt): public HTTPS and connection workflow.

@@ -21,7 +21,7 @@ token = os.environ.get('GB2GPT_BOT_TOKEN', '')
 if not token:
     raise SystemExit('Set GB2GPT_BOT_TOKEN in the secure environment, never chat')
 args = json.load(sys.stdin)
-req = Request(url + '/api/' + sys.argv[1], data=json.dumps(args).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
+req = Request(url + '/api/' + sys.argv[1], data=json.dumps(args).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token, 'User-Agent': 'gb2gpt-bot/1.0.0'})
 # Same-origin fixed endpoint; do not forward credentials through redirects.
 from urllib.request import HTTPRedirectHandler, build_opener
 class NoRedirect(HTTPRedirectHandler):
