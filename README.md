@@ -186,7 +186,7 @@ ChatGPT's OAuth access tokens last 1 hour and are refreshed automatically; refre
 To revoke linked ChatGPT access, stop the bridge, delete OAuth rows (jobs are kept):
 
 ```bash
-python3 -c "import sqlite3; db=sqlite3.connect('data/bridge.sqlite3'); db.executescript('DELETE FROM oauth_tokens; DELETE FROM oauth_codes; DELETE FROM oauth_forms;'); db.close()"
+python3 -c "import sqlite3; db=sqlite3.connect('data/bridge.sqlite3'); db.executescript('DELETE FROM oauth_tokens; DELETE FROM oauth_codes;'); db.close()"
 ```
 
 then rotate `BRIDGE_TOKEN`/`OAUTH_CLIENT_SECRET` locally, restart and reconnect. Rotating the owner token alone does not revoke already-issued OAuth access tokens. Rotate a bot token in `.env` and its secure bot store together, then restart. Never delete the jobs database merely to rotate credentials.
