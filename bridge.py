@@ -22,6 +22,7 @@ VERSION = '1.0.0'
 PROTOCOLS = ('2025-03-26', '2025-06-18', '2025-11-25')
 MAX_BODY = 131072
 LEASE = 900
+MAX_CONSUMED_FORMS = 1000
 ROOT = Path(__file__).resolve().parent
 
 
@@ -91,6 +92,7 @@ class Bridge:
         if not self.redirects or any(urlsplit(r).scheme != 'https' or urlsplit(r).fragment or urlsplit(r).query or urlsplit(r).username for r in self.redirects):
             raise ValueError('OAuth redirects must be exact HTTPS URLs without query/fragment/userinfo')
         self.owner = secret('BRIDGE_TOKEN')
+        self.form_key = hmac.digest(self.owner.encode(), b'gb2gpt authorization form v1', 'sha256')
         self.client_secret = secret('OAUTH_CLIENT_SECRET')
         self.bots = {}
         self.tokens = {digest(self.owner): 'owner'}
@@ -143,7 +145,7 @@ class Bridge:
         CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(bot_id, status, created);
         CREATE TABLE IF NOT EXISTS oauth_tokens(hash TEXT PRIMARY KEY, kind TEXT, expires REAL, resource TEXT);
         CREATE TABLE IF NOT EXISTS oauth_codes(hash TEXT PRIMARY KEY, data TEXT, expires REAL);
-        CREATE TABLE IF NOT EXISTS oauth_forms(hash TEXT PRIMARY KEY, data TEXT, expires REAL);
+        CREATE TABLE IF NOT EXISTS oauth_form_nonces(hash TEXT PRIMARY KEY, expires REAL);
         ''')
         # Existing tokens have no recoverable grant relationship: each starts a family.
         columns = {row['name'] for row in self.run('PRAGMA table_info(oauth_tokens)')}
@@ -530,35 +532,51 @@ class Handler(BaseHTTPRequestHandler):
                 raise Error('Invalid client or redirect URI; add the exact ChatGPT callback to fleet.json')
             if q.get('resource') != app.resource or q.get('response_type') != 'code' or q.get('code_challenge_method') != 'S256' or not re.fullmatch(r'[A-Za-z0-9_-]{43}', q.get('code_challenge', '')) or q.get('scope', 'bridge') != 'bridge' or not 1 <= len(q.get('state', '')) <= 2048:
                 raise Error('Authorization requires state, resource, scope=bridge, and S256 PKCE')
-            form = opaque()
-            with app.lock:
-                app.run('DELETE FROM oauth_forms WHERE expires<?', (time.time(),))
-                if app.run('SELECT count(*) FROM oauth_forms').fetchone()[0] >= 100:
-                    raise Error('Too many pending authorizations', 429)
-                app.run('INSERT INTO oauth_forms VALUES(?,?,?)', (digest(form), json.dumps(q), time.time() + 300))
+            csrf = opaque()
+            payload = {'data': q, 'expires': time.time() + 300, 'nonce': opaque(), 'csrf': digest(csrf)}
+            encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+            form = encoded + '.' + hmac.new(app.form_key, encoded.encode(), hashlib.sha256).hexdigest()
             body = f'''<!doctype html><html><head><meta charset="utf-8"><title>Connect gb2gpt</title></head><body>
 <h1>Connect your bot fleet to ChatGPT</h1><p>Allow ChatGPT to read this fleet's jobs, send messages, select a hub, and wake bots if enabled.</p>
 <p>Only continue if you started this connection. Enter BRIDGE_TOKEN from your local .env here, never in a chat.</p>
 <p>Callback: {html.escape(q['redirect_uri'])}</p><form method="post" action="/authorize">
 <input type="hidden" name="form" value="{form}"><label>Bridge owner token <input type="password" name="password" autocomplete="off" required></label>
 <button type="submit">Connect and allow</button></form></body></html>'''
-            return self.send(200, body, {'Set-Cookie': f'gb2gpt_csrf={form}; HttpOnly; SameSite=Lax; Path=/authorize; Max-Age=300' + ('; Secure' if app.url.startswith('https:') else '')}, 'text/html; charset=utf-8')
+            return self.send(200, body, {'Set-Cookie': f'gb2gpt_csrf={csrf}; HttpOnly; SameSite=Lax; Path=/authorize; Max-Age=300' + ('; Secure' if app.url.startswith('https:') else '')}, 'text/html; charset=utf-8')
         if self.command != 'POST':
             raise Error('Method not allowed', 405)
         q = self.read(form=True)
         form = q.get('form', '')
         cookie = dict(p.strip().split('=', 1) for p in self.headers.get('Cookie', '').split(';') if '=' in p)
-        if not form or not hmac.compare_digest(cookie.get('gb2gpt_csrf', ''), form):
+        encoded, sep, signature = form.partition('.')
+        expected = hmac.new(app.form_key, encoded.encode(), hashlib.sha256).hexdigest()
+        if not sep or not hmac.compare_digest(signature.encode(), expected.encode()):
             raise Error('Invalid authorization form', 403)
+        payload = json.loads(base64.urlsafe_b64decode(encoded))
+        if not hmac.compare_digest(digest(cookie.get('gb2gpt_csrf', '')), payload['csrf']):
+            raise Error('Invalid authorization form', 403)
+        if not hmac.compare_digest(q.get('password', '').encode(), app.owner.encode()):
+            raise Error('Invalid login or expired form; restart linking', 403)
         with app.lock:
-            row = app.run('SELECT * FROM oauth_forms WHERE hash=?', (digest(form),)).fetchone()
-            app.run('DELETE FROM oauth_forms WHERE hash=?', (digest(form),))
-            if not row or row['expires'] <= time.time() or not hmac.compare_digest(q.get('password', '').encode(), app.owner.encode()):
-                raise Error('Invalid login or expired form; restart linking', 403)
-            data = json.loads(row['data'])
-            code = opaque()
-            app.run('DELETE FROM oauth_codes WHERE expires<?', (time.time(),))
-            app.run('INSERT INTO oauth_codes VALUES(?,?,?)', (digest(code), row['data'], time.time() + 120))
+            app.run('BEGIN IMMEDIATE')
+            try:
+                now = time.time()
+                nonce = digest(payload['nonce'])
+                if payload['expires'] <= now or app.run('SELECT 1 FROM oauth_form_nonces WHERE hash=?', (nonce,)).fetchone():
+                    raise Error('Invalid login or expired form; restart linking', 403)
+                app.run('DELETE FROM oauth_form_nonces WHERE expires<=?', (now,))
+                # Only authenticated logins occupy replay storage; never evict live nonces.
+                if app.run('SELECT count(*) FROM oauth_form_nonces').fetchone()[0] >= MAX_CONSUMED_FORMS:
+                    raise Error('Too many completed authorizations; try again later', 429)
+                app.run('INSERT INTO oauth_form_nonces VALUES(?,?)', (nonce, payload['expires']))
+                data = payload['data']
+                code = opaque()
+                app.run('DELETE FROM oauth_codes WHERE expires<?', (now,))
+                app.run('INSERT INTO oauth_codes VALUES(?,?,?)', (digest(code), json.dumps(data), now + 120))
+                app.run('COMMIT')
+            except BaseException:
+                app.run('ROLLBACK')
+                raise
         return self.send(302, headers={'Location': data['redirect_uri'] + '?' + urlencode({'code': code, 'state': data['state'], 'iss': app.url}), 'Set-Cookie': 'gb2gpt_csrf=; HttpOnly; SameSite=Lax; Path=/authorize; Max-Age=0'})
 
     def token(self):

@@ -261,7 +261,7 @@ class BridgeTest(unittest.TestCase):
         _, _, report = self.http('/api/report_job', {'job_id': data['job']['id'], 'claim_token': claim['claim_token'], 'status': 'succeeded', 'result': 'hello from bot'}, os.environ['BOT_A'])
         self.assertEqual(report['result'], 'hello from bot')
 
-    def oauth_code(self):
+    def oauth_form(self):
         verifier = secrets.token_urlsafe(48)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
         data = {'client_id': 'gb2gpt', 'redirect_uri': self.config['oauth_redirect_uris'][0], 'resource': self.app.resource, 'response_type': 'code', 'code_challenge_method': 'S256', 'code_challenge': challenge, 'state': 'test-state', 'scope': 'bridge'}
@@ -270,12 +270,113 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers['Referrer-Policy'], 'strict-origin')
         form = re.search(r'name="form" value="([^"]+)"', body).group(1)
+        return data, verifier, opener, form, headers['Set-Cookie'].split(';')[0]
+
+    def oauth_code(self):
+        data, verifier, opener, form, _ = self.oauth_form()
         status, headers, _ = self.http('/authorize', {'form': form, 'password': os.environ['BRIDGE_TOKEN']}, form=True, opener=opener, headers={'Origin': self.base})
         self.assertEqual(status, 302)
         callback = parse_qs(urlsplit(headers['Location']).query)
         self.assertEqual(callback['iss'][0], self.base)
         self.assertEqual(callback['state'][0], 'test-state')
         return {'client_id': 'gb2gpt', 'client_secret': os.environ['OAUTH_CLIENT_SECRET'], 'grant_type': 'authorization_code', 'resource': self.app.resource, 'code': callback['code'][0], 'code_verifier': verifier, 'redirect_uri': data['redirect_uri']}
+
+    def submit_oauth_form(self, form, cookie, password=None):
+        return self.http('/authorize', {
+            'form': form, 'password': os.environ['BRIDGE_TOKEN'] if password is None else password,
+        }, form=True, headers={'Origin': self.base, 'Cookie': cookie})
+
+    def test_anonymous_authorize_flood_does_not_block_owner(self):
+        changes = self.app.db.total_changes
+        statuses = []
+        data, _, _, _, _ = self.oauth_form()
+        for _ in range(150):
+            statuses.append(self.http('/authorize?' + urlencode(data))[0])
+        self.assertEqual(set(statuses), {200})
+        self.assertEqual(self.app.db.total_changes, changes)
+        status, _, tokens = self.http('/token', self.oauth_code(), form=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(self.app.principal(tokens['access_token']), 'owner')
+
+    def test_signed_authorize_form_tampering(self):
+        _, _, _, form, cookie = self.oauth_form()
+        encoded, signature = form.split('.')
+        original = json.loads(base64.urlsafe_b64decode(encoded))
+        for field, value in (
+            ('client_id', 'other'), ('redirect_uri', 'https://evil.example/callback'),
+            ('resource', 'https://evil.example/mcp'), ('state', 'other-state'),
+            ('code_challenge', 'x' * 43), ('code_challenge_method', 'plain'),
+            ('scope', 'other'), ('response_type', 'token'),
+        ):
+            with self.subTest(field=field):
+                payload = dict(original, data=dict(original['data'], **{field: value}))
+                changed = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+                self.assertEqual(self.submit_oauth_form(changed + '.' + signature, cookie)[0], 403)
+        for field, value in (('expires', original['expires'] + 300), ('nonce', 'other'), ('csrf', 'other')):
+            with self.subTest(field=field):
+                payload = dict(original, **{field: value})
+                changed = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+                self.assertEqual(self.submit_oauth_form(changed + '.' + signature, cookie)[0], 403)
+        for invalid in ('malformed', form + 'x', encoded + '.' + '0' * 64):
+            self.assertEqual(self.submit_oauth_form(invalid, cookie)[0], 403)
+        self.assertEqual(self.submit_oauth_form(form, cookie)[0], 302)
+
+    def test_signed_authorize_expiry_and_csrf_binding(self):
+        now = time.time()
+        with patch('bridge.time.time', return_value=now):
+            _, _, _, form, cookie = self.oauth_form()
+            _, _, _, _, other_cookie = self.oauth_form()
+        for wrong_cookie in ('', other_cookie):
+            self.assertEqual(self.submit_oauth_form(form, wrong_cookie)[0], 403)
+        self.assertEqual(self.submit_oauth_form(form, cookie, password='wrong')[0], 403)
+        with patch('bridge.time.time', return_value=now + 300):
+            self.assertEqual(self.submit_oauth_form(form, cookie)[0], 403)
+        self.assertEqual(self.app.run('SELECT count(*) FROM oauth_codes').fetchone()[0], 0)
+
+    def test_signed_authorize_replay_concurrent_and_after_restart(self):
+        _, _, _, form, cookie = self.oauth_form()
+        _, _, _, pending, pending_cookie = self.oauth_form()
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            results = list(ex.map(lambda _: self.submit_oauth_form(form, cookie), range(2)))
+        self.assertEqual(sorted(r[0] for r in results), [302, 403])
+        self.app.db.close()
+        self.app = Bridge(self.config, self.dbpath)
+        self.app.url, self.app.resource = self.base, self.base + '/mcp'
+        self.server.app = self.app
+        self.assertEqual(self.submit_oauth_form(form, cookie)[0], 403)
+        self.assertEqual(self.app.run('SELECT count(*) FROM oauth_codes').fetchone()[0], 1)
+        self.assertEqual(self.submit_oauth_form(pending, pending_cookie)[0], 302)
+
+    def test_signed_authorize_nonce_storage_is_bounded_and_expires(self):
+        now = time.time()
+        with patch('bridge.MAX_CONSUMED_FORMS', 2), patch('bridge.time.time', return_value=now):
+            forms = []
+            for _ in range(2):
+                _, _, _, form, cookie = self.oauth_form()
+                forms.append((form, cookie))
+                self.assertEqual(self.submit_oauth_form(form, cookie, password='wrong')[0], 403)
+                self.assertEqual(self.submit_oauth_form(form, cookie)[0], 302)
+            _, _, _, form, cookie = self.oauth_form()
+            self.assertEqual(self.submit_oauth_form(form, cookie)[0], 429)
+            self.assertEqual(self.app.run('SELECT count(*) FROM oauth_form_nonces').fetchone()[0], 2)
+            for old_form, old_cookie in forms:
+                self.assertEqual(self.submit_oauth_form(old_form, old_cookie)[0], 403)
+            with patch('bridge.time.time', return_value=now + 300):
+                _, _, _, fresh, fresh_cookie = self.oauth_form()
+                self.assertEqual(self.submit_oauth_form(fresh, fresh_cookie)[0], 302)
+                self.assertEqual(self.submit_oauth_form(form, cookie)[0], 403)
+                self.assertEqual(self.app.run('SELECT count(*) FROM oauth_form_nonces').fetchone()[0], 1)
+
+    def test_signed_authorize_preserves_parameter_validation(self):
+        data, _, _, _, _ = self.oauth_form()
+        for field, value in (
+            ('client_id', 'other'), ('redirect_uri', 'https://evil.example/callback'),
+            ('resource', 'https://evil.example/mcp'), ('state', ''),
+            ('code_challenge', 'short'), ('code_challenge_method', 'plain'),
+            ('scope', 'other'), ('response_type', 'token'),
+        ):
+            with self.subTest(field=field):
+                self.assertEqual(self.http('/authorize?' + urlencode(dict(data, **{field: value})))[0], 400)
 
     def test_oauth_pkce_replay_refresh_and_audience(self):
         args = self.oauth_code()
