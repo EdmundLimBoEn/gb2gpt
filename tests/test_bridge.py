@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -293,6 +294,138 @@ class BridgeTest(unittest.TestCase):
         self.app.run('UPDATE oauth_tokens SET expires=0 WHERE hash=?', (digest(tokens['access_token']),))
         with self.assertRaises(Error):
             self.app.principal(tokens['access_token'])
+
+    def refresh(self, token):
+        return self.http('/token', {
+            'client_id': 'gb2gpt', 'client_secret': os.environ['OAUTH_CLIENT_SECRET'],
+            'grant_type': 'refresh_token', 'resource': self.app.resource,
+            'refresh_token': token,
+        }, form=True)
+
+    def test_refresh_reuse_revokes_family(self):
+        first = self.http('/token', self.oauth_code(), form=True)[2]
+        unrelated = self.http('/token', self.oauth_code(), form=True)[2]
+        original = self.app.run('SELECT * FROM oauth_tokens WHERE hash=?',
+                                (digest(first['refresh_token']),)).fetchone()
+        with patch('bridge.time.time', return_value=time.time() + 60):
+            status, _, second = self.refresh(first['refresh_token'])
+            self.assertEqual(status, 200)
+            status, _, third = self.refresh(second['refresh_token'])
+            self.assertEqual(status, 200)
+        for tokens in (first, second, third):
+            row = self.app.run('SELECT * FROM oauth_tokens WHERE hash=?',
+                               (digest(tokens['refresh_token']),)).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row['family'], original['family'])
+        # Reopening must preserve consumed-token detection and grant membership.
+        self.app.db.close()
+        self.app = Bridge(self.config, self.dbpath)
+        self.app.url, self.app.resource = self.base, self.base + '/mcp'
+        self.server.app = self.app
+        self.assertEqual(self.refresh(first['refresh_token'])[0], 400)
+        for tokens in (first, second, third):
+            with self.assertRaises(Error) as rejected:
+                self.app.principal(tokens['access_token'])
+            self.assertEqual(rejected.exception.status, 401)
+            self.assertEqual(self.refresh(tokens['refresh_token'])[0], 400)
+        self.assertEqual(self.app.principal(unrelated['access_token']), 'owner')
+        self.assertEqual(self.refresh(unrelated['refresh_token'])[0], 200)
+
+    def test_legacy_token_migration_and_expiry(self):
+        self.app.db.close()
+        with sqlite3.connect(self.dbpath) as db:
+            db.execute('DROP TABLE oauth_tokens')
+            db.execute('CREATE TABLE oauth_tokens(hash TEXT PRIMARY KEY, kind TEXT, expires REAL, resource TEXT)')
+            expires = time.time() + 60
+            for token, kind in (('legacy-refresh', 'refresh'), ('legacy-access', 'access')):
+                db.execute('INSERT INTO oauth_tokens VALUES(?,?,?,?)',
+                           (digest(token), kind, expires, self.base + '/mcp'))
+        self.app = Bridge(self.config, self.dbpath)
+        self.app.url, self.app.resource = self.base, self.base + '/mcp'
+        self.server.app = self.app
+        self.assertEqual(self.app.principal('legacy-access'), 'owner')
+        status, _, successor = self.refresh('legacy-refresh')
+        self.assertEqual(status, 200)
+        row = self.app.run('SELECT * FROM oauth_tokens WHERE hash=?',
+                           (digest(successor['refresh_token']),)).fetchone()
+        self.assertEqual(row['family'], digest('legacy-refresh'))
+        # Rotation keeps the existing sliding 90-day refresh lifetime.
+        self.assertGreater(row['expires'], time.time() + 89 * 86400)
+        self.assertEqual(self.refresh('legacy-refresh')[0], 400)
+        with self.assertRaises(Error):
+            self.app.principal(successor['access_token'])
+        self.assertEqual(self.app.principal('legacy-access'), 'owner')
+
+    def test_concurrent_refresh_reuse_revokes_winner(self):
+        tokens = self.http('/token', self.oauth_code(), form=True)[2]
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            results = list(ex.map(self.refresh, [tokens['refresh_token']] * 2))
+        self.assertEqual(sorted(r[0] for r in results), [200, 400])
+        winner = next(r[2] for r in results if r[0] == 200)
+        self.assertEqual(self.refresh(winner['refresh_token'])[0], 400)
+        with self.assertRaises(Error):
+            self.app.principal(winner['access_token'])
+
+    def test_long_poll_limits_leave_other_requests_available(self):
+        for bid in ('c', 'd'):
+            self.app.bots[bid] = {'id': bid, 'name': bid}
+        jobs = {role: self.call('create_job', {
+            'conversation_id': 'polls', 'request_id': role, 'message': 'wait',
+            'bot_id': 'a' if role == 'owner' else role,
+        })['job']['id'] for role in ('owner', 'a', 'b', 'c', 'd')}
+        entered = threading.Condition()
+        release = threading.Event()
+        sleepers = 0
+
+        def sleep(_):
+            nonlocal sleepers
+            with entered:
+                sleepers += 1
+                entered.notify_all()
+            if not release.wait(5):
+                raise RuntimeError('Test did not release poll')
+
+        with ThreadPoolExecutor(max_workers=8) as ex, patch('bridge.time.sleep', side_effect=sleep):
+            futures = []
+            try:
+                for role in ('owner', 'a', 'b', 'c'):
+                    for _ in range(2):
+                        futures.append(ex.submit(self.call, 'get_job',
+                                                 {'job_id': jobs[role], 'wait_seconds': 15}, role))
+                    with entered:
+                        self.assertTrue(entered.wait_for(lambda: sleepers == len(futures), timeout=2))
+                    if role == 'owner':
+                        for path, data in (
+                            ('/api/get_job', {'job_id': jobs['owner'], 'wait_seconds': 15}),
+                            ('/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                                      'params': {'name': 'get_job', 'arguments': {
+                                          'job_id': jobs['owner'], 'wait_seconds': 15}}}),
+                        ):
+                            self.assertEqual(self.http(path, data, os.environ['BRIDGE_TOKEN'])[0], 429)
+                with self.assertRaises(Error) as rejected:
+                    self.call('get_job', {'job_id': jobs['d'], 'wait_seconds': 15}, 'd')
+                self.assertEqual(rejected.exception.status, 429)
+                self.assertEqual(self.http('/health')[0], 200)
+                self.assertEqual(self.call('get_job', {'job_id': jobs['owner']})['status'], 'queued')
+                self.assertEqual(self.http('/api/list_bots', {}, os.environ['BRIDGE_TOKEN'])[0], 200)
+            finally:
+                with self.app.lock:
+                    self.app.run("UPDATE jobs SET status='succeeded'")
+                release.set()
+            for future in futures:
+                self.assertEqual(future.result(timeout=2)['status'], 'succeeded')
+        self.assertEqual(self.app.polls, {})
+
+    def test_long_poll_capacity_released_on_timeout_and_exception(self):
+        jid = self.create()['job']['id']
+        args = {'job_id': jid, 'wait_seconds': 1}
+        for _ in range(3):
+            with patch('bridge.time.sleep', side_effect=RuntimeError('interrupted')):
+                with self.assertRaises(RuntimeError):
+                    self.call('get_job', args)
+        for _ in range(3):
+            self.assertEqual(self.call('get_job', args)['status'], 'queued')
+        self.assertEqual(self.app.polls, {})
 
     def test_oauth_redirect_and_csrf_rejection(self):
         self.assertEqual(self.http('/authorize?' + urlencode({'client_id': 'gb2gpt', 'redirect_uri': 'https://evil.example'}))[0], 400)

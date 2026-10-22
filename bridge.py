@@ -124,6 +124,7 @@ class Bridge:
                 if bot.get('webhook_url'):
                     secret(bot['webhook_key_env'], minimum=1)
         self.lock = threading.RLock()
+        self.polls = {}
         Path(db).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(db, check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
@@ -144,6 +145,14 @@ class Bridge:
         CREATE TABLE IF NOT EXISTS oauth_codes(hash TEXT PRIMARY KEY, data TEXT, expires REAL);
         CREATE TABLE IF NOT EXISTS oauth_forms(hash TEXT PRIMARY KEY, data TEXT, expires REAL);
         ''')
+        # Existing tokens have no recoverable grant relationship: each starts a family.
+        columns = {row['name'] for row in self.run('PRAGMA table_info(oauth_tokens)')}
+        if 'family' not in columns:
+            self.run('ALTER TABLE oauth_tokens ADD COLUMN family TEXT')
+        if 'consumed' not in columns:
+            self.run('ALTER TABLE oauth_tokens ADD COLUMN consumed INTEGER NOT NULL DEFAULT 0')
+        self.run('UPDATE oauth_tokens SET family=hash WHERE family IS NULL')
+        self.run('CREATE INDEX IF NOT EXISTS oauth_tokens_family ON oauth_tokens(family)')
         self.instructions = (ROOT / 'prompts/chatgpt.md').read_text()
 
     def run(self, sql, args=()):
@@ -176,15 +185,28 @@ class Bridge:
         validate(args, specs[name]['inputSchema'])
         if name == 'get_job':
             deadline = time.monotonic() + args.get('wait_seconds', 0)
-            while True:
-                with self.lock:
-                    row = self.job(args['job_id'])
-                    if role != 'owner' and row['bot_id'] != role:
-                        raise Error('Job belongs to another bot', 403)
-                    result = self.public_job(row)
-                if row['status'] in ('succeeded', 'failed') or time.monotonic() >= deadline:
-                    return result
-                time.sleep(0.2)
+            waiting = False
+            try:
+                while True:
+                    with self.lock:
+                        row = self.job(args['job_id'])
+                        if role != 'owner' and row['bot_id'] != role:
+                            raise Error('Job belongs to another bot', 403)
+                        result = self.public_job(row)
+                        if row['status'] in ('succeeded', 'failed') or time.monotonic() >= deadline:
+                            return result
+                        if not waiting:
+                            if self.polls.get(role, 0) >= 2 or sum(self.polls.values()) >= 8:
+                                raise Error('Too many concurrent job waits', 429)
+                            self.polls[role] = self.polls.get(role, 0) + 1
+                            waiting = True
+                    time.sleep(0.2)
+            finally:
+                if waiting:
+                    with self.lock:
+                        self.polls[role] -= 1
+                        if not self.polls[role]:
+                            del self.polls[role]
         if name == 'wake_job':
             return self.wake(args['job_id'])
         with self.lock:
@@ -485,6 +507,8 @@ class Handler(BaseHTTPRequestHandler):
                 value = self.app.call(role, params.get('name'), params.get('arguments', {}))
                 result = {'content': [{'type': 'text', 'text': json.dumps(value)}], 'structuredContent': value, 'isError': False}
             except Error as e:
+                if e.status == 429:
+                    raise
                 result = {'content': [{'type': 'text', 'text': str(e)}], 'isError': True}
         else:
             return self.send(200, {'jsonrpc': '2.0', 'id': rid, 'error': {'code': -32601, 'message': 'Method not found'}})
@@ -554,6 +578,7 @@ class Handler(BaseHTTPRequestHandler):
             raise Error('invalid_target')
         with app.lock:
             app.run('BEGIN IMMEDIATE')
+            reuse = False
             try:
                 if q.get('grant_type') == 'authorization_code':
                     hashed = digest(q.get('code', ''))
@@ -566,21 +591,29 @@ class Handler(BaseHTTPRequestHandler):
                     if not re.fullmatch(r'[A-Za-z0-9._~-]{43,128}', verifier) or not hmac.compare_digest(challenge, data['code_challenge']) or q.get('redirect_uri') != data['redirect_uri'] or data['resource'] != app.resource:
                         raise Error('invalid_grant')
                     app.run('DELETE FROM oauth_codes WHERE hash=?', (hashed,))
+                    family, expires = opaque(), time.time() + 90 * 86400
                 elif q.get('grant_type') == 'refresh_token':
                     hashed = digest(q.get('refresh_token', ''))
                     row = app.run('SELECT * FROM oauth_tokens WHERE hash=?', (hashed,)).fetchone()
                     if not row or row['kind'] != 'refresh' or row['expires'] <= time.time() or row['resource'] != app.resource:
                         raise Error('invalid_grant')
-                    app.run('DELETE FROM oauth_tokens WHERE hash=?', (hashed,))
+                    family, expires = row['family'], time.time() + 90 * 86400
+                    if row['consumed']:
+                        app.run("DELETE FROM oauth_tokens WHERE family=? AND kind='access'", (family,))
+                        app.run("UPDATE oauth_tokens SET consumed=1 WHERE family=? AND kind='refresh'", (family,))
+                        reuse = True
+                        raise Error('invalid_grant')
+                    app.run('UPDATE oauth_tokens SET consumed=1 WHERE hash=?', (hashed,))
                 else:
                     raise Error('unsupported_grant_type')
                 access, refresh = opaque(), opaque()
                 app.run('DELETE FROM oauth_tokens WHERE expires<?', (time.time(),))
-                app.run('INSERT INTO oauth_tokens VALUES(?,?,?,?)', (digest(access), 'access', time.time() + 3600, app.resource))
-                app.run('INSERT INTO oauth_tokens VALUES(?,?,?,?)', (digest(refresh), 'refresh', time.time() + 90 * 86400, app.resource))
+                app.run('INSERT INTO oauth_tokens(hash,kind,expires,resource,family) VALUES(?,?,?,?,?)', (digest(access), 'access', time.time() + 3600, app.resource, family))
+                app.run('INSERT INTO oauth_tokens(hash,kind,expires,resource,family) VALUES(?,?,?,?,?)', (digest(refresh), 'refresh', expires, app.resource, family))
                 app.run('COMMIT')
             except BaseException:
-                app.run('ROLLBACK')
+                # Reuse rejection must persist revocation, not roll it back.
+                app.run('COMMIT' if reuse else 'ROLLBACK')
                 raise
         return self.send(200, {'access_token': access, 'token_type': 'Bearer', 'expires_in': 3600, 'refresh_token': refresh, 'scope': 'bridge'})
 
