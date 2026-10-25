@@ -13,13 +13,13 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit, parse_qs
 from urllib.request import Request, build_opener, HTTPCookieProcessor
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bridge import Bridge, Error, Server, NoRedirect, digest
+from bridge import Bridge, Error, Handler, Server, NoRedirect, digest
 
 
 class BridgeTest(unittest.TestCase):
@@ -543,6 +543,34 @@ class BridgeTest(unittest.TestCase):
         self.config['bots'][0]['webhook_url'] = 'https://127.0.0.1/private'
         with self.assertRaises(ValueError):
             Bridge(self.config, self.dbpath)
+
+
+class InstructionTest(unittest.TestCase):
+    def test_mcp_initialize_uses_startup_instructions_without_file_reads(self):
+        prompts = Path(__file__).resolve().parents[1] / 'prompts'
+        owner_instructions = (prompts / 'chatgpt.md').read_text()
+        worker_instructions = (prompts / 'bot.md').read_text()
+        env = {name: secrets.token_urlsafe(32) for name in
+               ('BRIDGE_TOKEN', 'OAUTH_CLIENT_SECRET', 'BOT_A')}
+        config = {'fleet_name': 'Test', 'public_url': 'http://127.0.0.1:8787',
+                  'oauth_redirect_uris': ['https://chatgpt.com/connector_platform_oauth_redirect'],
+                  'bots': [{'id': 'a', 'name': 'A', 'token_env': 'BOT_A'}]}
+        with patch.dict(os.environ, dict(env, WAKE_ENABLED='false')):
+            app = Bridge(config, ':memory:')
+        self.addCleanup(app.db.close)
+        handler = Handler.__new__(Handler)
+        handler.server = Mock(app=app)
+        handler.send = Mock()
+        request = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {}}
+        with patch.object(Path, 'read_text', side_effect=OSError('Instructions unavailable')) as read:
+            for _ in range(2):
+                for role, expected in [('owner', owner_instructions), ('a', worker_instructions)]:
+                    with self.subTest(role=role):
+                        handler.rpc(role, request)
+                        status, body = handler.send.call_args.args
+                        self.assertEqual(status, 200)
+                        self.assertEqual(body['result']['instructions'], expected)
+            read.assert_not_called()
 
 
 if __name__ == '__main__':
