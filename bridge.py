@@ -27,9 +27,10 @@ ROOT = Path(__file__).resolve().parent
 
 
 class Error(Exception):
-    def __init__(self, message, status=400):
+    def __init__(self, message, status=400, retry_after=None):
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
 
 
 def digest(value):
@@ -199,7 +200,7 @@ class Bridge:
                             return result
                         if not waiting:
                             if self.polls.get(role, 0) >= 2 or sum(self.polls.values()) >= 8:
-                                raise Error('Too many concurrent job waits', 429)
+                                raise Error('Too many concurrent job waits', 429, retry_after=1)
                             self.polls[role] = self.polls.get(role, 0) + 1
                             waiting = True
                     time.sleep(0.2)
@@ -472,7 +473,9 @@ class Handler(BaseHTTPRequestHandler):
             name = path.removeprefix('/api/')
             return self.send(200, self.app.call(role, name, self.read()))
         except Error as e:
-            headers = None
+            headers = {}
+            if e.retry_after is not None:
+                headers['Retry-After'] = str(e.retry_after)
             if e.status == 401:
                 headers = {'WWW-Authenticate': f'Bearer resource_metadata="{self.app.url}/.well-known/oauth-protected-resource", scope="bridge"'}
             self.send(e.status, {'error': str(e)}, headers)
