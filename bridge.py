@@ -395,7 +395,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.server.app
 
     def send(self, status, body=None, headers=None, content_type='application/json'):
-        raw = b'' if body is None else (body.encode() if isinstance(body, str) else json.dumps(body).encode())
+        raw = b'' if body is None else (body.encode() if isinstance(body, str) else json.dumps(body, ensure_ascii=False).encode('utf-8'))
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(raw)))
@@ -507,7 +507,7 @@ class Handler(BaseHTTPRequestHandler):
         elif method == 'tools/call':
             try:
                 value = self.app.call(role, params.get('name'), params.get('arguments', {}))
-                result = {'content': [{'type': 'text', 'text': json.dumps(value)}], 'structuredContent': value, 'isError': False}
+                result = {'content': [{'type': 'text', 'text': json.dumps(value, ensure_ascii=False)}], 'structuredContent': value, 'isError': False}
             except Error as e:
                 if e.status == 429:
                     raise

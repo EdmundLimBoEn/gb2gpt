@@ -2,6 +2,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import http.cookiejar
+import io
 import json
 import os
 from pathlib import Path
@@ -13,13 +14,13 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit, parse_qs
 from urllib.request import Request, build_opener, HTTPCookieProcessor
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bridge import Bridge, Error, Server, NoRedirect, digest
+from bridge import Bridge, Error, Handler, Server, NoRedirect, digest
 
 
 class BridgeTest(unittest.TestCase):
@@ -543,6 +544,45 @@ class BridgeTest(unittest.TestCase):
         self.config['bots'][0]['webhook_url'] = 'https://127.0.0.1/private'
         with self.assertRaises(ValueError):
             Bridge(self.config, self.dbpath)
+
+
+class ResponseSerializationTest(unittest.TestCase):
+    def test_unicode_responses_use_compact_utf8(self):
+        text = '\U0001f600' * 20000
+        expected = {'result': text, 'status': 'succeeded'}
+        for mcp, copies in ((False, 1), (True, 2)):
+            with self.subTest(mcp=mcp):
+                handler = Handler.__new__(Handler)
+                handler.server = Mock()
+                handler.server.app.call.return_value = expected
+                handler.wfile = io.BytesIO()
+                handler.send_response = Mock()
+                handler.send_header = Mock()
+                handler.end_headers = Mock()
+                if mcp:
+                    handler.rpc('owner', {
+                        'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                        'params': {'name': 'get_job', 'arguments': {'job_id': 'test-job'}},
+                    })
+                    handler.server.app.call.assert_called_once_with(
+                        'owner', 'get_job', {'job_id': 'test-job'})
+                else:
+                    handler.send(200, expected)
+                raw = handler.wfile.getvalue()
+                handler.send_response.assert_called_once_with(200)
+                handler.send_header.assert_any_call('Content-Type', 'application/json')
+                handler.send_header.assert_any_call('Content-Length', str(len(raw)))
+                decoded = json.loads(raw.decode('utf-8'))
+                if mcp:
+                    result = decoded['result']
+                    self.assertFalse(result['isError'])
+                    self.assertEqual(json.loads(result['content'][0]['text']), expected)
+                    self.assertEqual(result['structuredContent'], expected)
+                else:
+                    self.assertEqual(decoded, expected)
+                self.assertEqual(raw.count(text.encode('utf-8')), copies)
+                # Allow metadata overhead, but reject escape expansion at either layer.
+                self.assertLess(len(raw), copies * 80000 + 1000)
 
 
 if __name__ == '__main__':
