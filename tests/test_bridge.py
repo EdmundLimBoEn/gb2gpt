@@ -474,6 +474,22 @@ class BridgeTest(unittest.TestCase):
             'conversation_id': 'polls', 'request_id': role, 'message': 'wait',
             'bot_id': 'a' if role == 'owner' else role,
         })['job']['id'] for role in ('owner', 'a', 'b', 'c', 'd')}
+        bot_d_token = secrets.token_urlsafe(32)
+        self.app.tokens[digest(bot_d_token)] = 'd'
+
+        def assert_poll_rejected(role, token):
+            args = {'job_id': jobs[role], 'wait_seconds': 15}
+            for path, data in (
+                ('/api/get_job', args),
+                ('/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                          'params': {'name': 'get_job', 'arguments': args}}),
+            ):
+                with self.subTest(role=role, path=path):
+                    status, headers, body = self.http(path, data, token)
+                    self.assertEqual(status, 429)
+                    self.assertEqual(headers.get('Retry-After'), '1')
+                    self.assertEqual(body, {'error': 'Too many concurrent job waits'})
+
         entered = threading.Condition()
         release = threading.Event()
         sleepers = 0
@@ -496,13 +512,9 @@ class BridgeTest(unittest.TestCase):
                     with entered:
                         self.assertTrue(entered.wait_for(lambda: sleepers == len(futures), timeout=2))
                     if role == 'owner':
-                        for path, data in (
-                            ('/api/get_job', {'job_id': jobs['owner'], 'wait_seconds': 15}),
-                            ('/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
-                                      'params': {'name': 'get_job', 'arguments': {
-                                          'job_id': jobs['owner'], 'wait_seconds': 15}}}),
-                        ):
-                            self.assertEqual(self.http(path, data, os.environ['BRIDGE_TOKEN'])[0], 429)
+                        assert_poll_rejected('owner', os.environ['BRIDGE_TOKEN'])
+                assert_poll_rejected('d', bot_d_token)
+                self.assertEqual(self.app.polls, {role: 2 for role in ('owner', 'a', 'b', 'c')})
                 with self.assertRaises(Error) as rejected:
                     self.call('get_job', {'job_id': jobs['d'], 'wait_seconds': 15}, 'd')
                 self.assertEqual(rejected.exception.status, 429)

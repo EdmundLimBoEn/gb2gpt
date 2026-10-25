@@ -164,6 +164,8 @@ Job submissions require `conversation_id` and `request_id`; retries must preserv
 
 For the optional Custom GPT Action schema, see [CHATGPT_SETUP.md](CHATGPT_SETUP.md#optional-custom-gpt-action-path). Ordinary MCP chats remain the default.
 
+Long polls are limited to two concurrent waits per identity and eight globally. When either limit is reached, REST and MCP return HTTP 429 with `Retry-After: 1` (seconds). Wait at least that long before retrying `get_job` for the same job; on repeated 429s, use exponential backoff (for example 1, 2, 4, 8 seconds, capped at 20 seconds) plus random jitter. Keep polls sequential where possible; do not start parallel retries or switch to a tight loop of zero-wait requests. A 429 does not mean the job has finished.
+
 ## Operation and validation
 
 ```bash
