@@ -157,6 +157,7 @@ class Bridge:
         self.run('UPDATE oauth_tokens SET family=hash WHERE family IS NULL')
         self.run('CREATE INDEX IF NOT EXISTS oauth_tokens_family ON oauth_tokens(family)')
         self.instructions = (ROOT / 'prompts/chatgpt.md').read_text()
+        self.worker_instructions = (ROOT / 'prompts/bot.md').read_text()
 
     def run(self, sql, args=()):
         return self.db.execute(sql, args)
@@ -502,7 +503,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {'jsonrpc': '2.0', 'id': rid, 'error': {'code': -32602, 'message': 'Invalid params'}})
         if method == 'initialize':
             version = params.get('protocolVersion')
-            result = {'protocolVersion': version if version in PROTOCOLS else '2025-11-25', 'capabilities': {'tools': {'listChanged': False}}, 'serverInfo': {'name': 'gb2gpt', 'version': VERSION}, 'instructions': self.app.instructions if role == 'owner' else (ROOT / 'prompts/bot.md').read_text()}
+            result = {'protocolVersion': version if version in PROTOCOLS else '2025-11-25', 'capabilities': {'tools': {'listChanged': False}}, 'serverInfo': {'name': 'gb2gpt', 'version': VERSION}, 'instructions': self.app.instructions if role == 'owner' else self.app.worker_instructions}
         elif method == 'ping':
             result = {}
         elif method == 'tools/list':
