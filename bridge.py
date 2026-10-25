@@ -27,9 +27,10 @@ ROOT = Path(__file__).resolve().parent
 
 
 class Error(Exception):
-    def __init__(self, message, status=400):
+    def __init__(self, message, status=400, retry_after=None):
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
 
 
 def digest(value):
@@ -200,7 +201,7 @@ class Bridge:
                             return result
                         if not waiting:
                             if self.polls.get(role, 0) >= 2 or sum(self.polls.values()) >= 8:
-                                raise Error('Too many concurrent job waits', 429)
+                                raise Error('Too many concurrent job waits', 429, retry_after=1)
                             self.polls[role] = self.polls.get(role, 0) + 1
                             waiting = True
                     time.sleep(0.2)
@@ -396,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.server.app
 
     def send(self, status, body=None, headers=None, content_type='application/json'):
-        raw = b'' if body is None else (body.encode() if isinstance(body, str) else json.dumps(body).encode())
+        raw = b'' if body is None else (body.encode() if isinstance(body, str) else json.dumps(body, ensure_ascii=False).encode('utf-8'))
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(raw)))
@@ -473,7 +474,9 @@ class Handler(BaseHTTPRequestHandler):
             name = path.removeprefix('/api/')
             return self.send(200, self.app.call(role, name, self.read()))
         except Error as e:
-            headers = None
+            headers = {}
+            if e.retry_after is not None:
+                headers['Retry-After'] = str(e.retry_after)
             if e.status == 401:
                 headers = {'WWW-Authenticate': f'Bearer resource_metadata="{self.app.url}/.well-known/oauth-protected-resource", scope="bridge"'}
             self.send(e.status, {'error': str(e)}, headers)
@@ -508,7 +511,7 @@ class Handler(BaseHTTPRequestHandler):
         elif method == 'tools/call':
             try:
                 value = self.app.call(role, params.get('name'), params.get('arguments', {}))
-                result = {'content': [{'type': 'text', 'text': json.dumps(value)}], 'structuredContent': value, 'isError': False}
+                result = {'content': [{'type': 'text', 'text': json.dumps(value, ensure_ascii=False)}], 'structuredContent': value, 'isError': False}
             except Error as e:
                 if e.status == 429:
                     raise

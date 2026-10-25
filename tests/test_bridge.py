@@ -2,6 +2,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import http.cookiejar
+import io
 import json
 import os
 from pathlib import Path
@@ -474,6 +475,22 @@ class BridgeTest(unittest.TestCase):
             'conversation_id': 'polls', 'request_id': role, 'message': 'wait',
             'bot_id': 'a' if role == 'owner' else role,
         })['job']['id'] for role in ('owner', 'a', 'b', 'c', 'd')}
+        bot_d_token = secrets.token_urlsafe(32)
+        self.app.tokens[digest(bot_d_token)] = 'd'
+
+        def assert_poll_rejected(role, token):
+            args = {'job_id': jobs[role], 'wait_seconds': 15}
+            for path, data in (
+                ('/api/get_job', args),
+                ('/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                          'params': {'name': 'get_job', 'arguments': args}}),
+            ):
+                with self.subTest(role=role, path=path):
+                    status, headers, body = self.http(path, data, token)
+                    self.assertEqual(status, 429)
+                    self.assertEqual(headers.get('Retry-After'), '1')
+                    self.assertEqual(body, {'error': 'Too many concurrent job waits'})
+
         entered = threading.Condition()
         release = threading.Event()
         sleepers = 0
@@ -496,13 +513,9 @@ class BridgeTest(unittest.TestCase):
                     with entered:
                         self.assertTrue(entered.wait_for(lambda: sleepers == len(futures), timeout=2))
                     if role == 'owner':
-                        for path, data in (
-                            ('/api/get_job', {'job_id': jobs['owner'], 'wait_seconds': 15}),
-                            ('/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
-                                      'params': {'name': 'get_job', 'arguments': {
-                                          'job_id': jobs['owner'], 'wait_seconds': 15}}}),
-                        ):
-                            self.assertEqual(self.http(path, data, os.environ['BRIDGE_TOKEN'])[0], 429)
+                        assert_poll_rejected('owner', os.environ['BRIDGE_TOKEN'])
+                assert_poll_rejected('d', bot_d_token)
+                self.assertEqual(self.app.polls, {role: 2 for role in ('owner', 'a', 'b', 'c')})
                 with self.assertRaises(Error) as rejected:
                     self.call('get_job', {'job_id': jobs['d'], 'wait_seconds': 15}, 'd')
                 self.assertEqual(rejected.exception.status, 429)
@@ -571,6 +584,45 @@ class InstructionTest(unittest.TestCase):
                         self.assertEqual(status, 200)
                         self.assertEqual(body['result']['instructions'], expected)
             read.assert_not_called()
+
+
+class ResponseSerializationTest(unittest.TestCase):
+    def test_unicode_responses_use_compact_utf8(self):
+        text = '\U0001f600' * 20000
+        expected = {'result': text, 'status': 'succeeded'}
+        for mcp, copies in ((False, 1), (True, 2)):
+            with self.subTest(mcp=mcp):
+                handler = Handler.__new__(Handler)
+                handler.server = Mock()
+                handler.server.app.call.return_value = expected
+                handler.wfile = io.BytesIO()
+                handler.send_response = Mock()
+                handler.send_header = Mock()
+                handler.end_headers = Mock()
+                if mcp:
+                    handler.rpc('owner', {
+                        'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                        'params': {'name': 'get_job', 'arguments': {'job_id': 'test-job'}},
+                    })
+                    handler.server.app.call.assert_called_once_with(
+                        'owner', 'get_job', {'job_id': 'test-job'})
+                else:
+                    handler.send(200, expected)
+                raw = handler.wfile.getvalue()
+                handler.send_response.assert_called_once_with(200)
+                handler.send_header.assert_any_call('Content-Type', 'application/json')
+                handler.send_header.assert_any_call('Content-Length', str(len(raw)))
+                decoded = json.loads(raw.decode('utf-8'))
+                if mcp:
+                    result = decoded['result']
+                    self.assertFalse(result['isError'])
+                    self.assertEqual(json.loads(result['content'][0]['text']), expected)
+                    self.assertEqual(result['structuredContent'], expected)
+                else:
+                    self.assertEqual(decoded, expected)
+                self.assertEqual(raw.count(text.encode('utf-8')), copies)
+                # Allow metadata overhead, but reject escape expansion at either layer.
+                self.assertLess(len(raw), copies * 80000 + 1000)
 
 
 if __name__ == '__main__':
